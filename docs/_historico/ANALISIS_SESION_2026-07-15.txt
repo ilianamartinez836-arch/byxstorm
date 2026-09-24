@@ -1,0 +1,211 @@
+============================================================
+ BYX STORM - SESION 2026-07-15
+ REORGANIZACION DEL PROYECTO + BARRIDO DE ERRORES
+============================================================
+
+Esta sesion hizo DOS cosas:
+  (1) Reestructuro fisicamente el proyecto y regenero vcxproj/filters.
+  (2) Barrido de errores en todo el proyecto -> este reporte.
+
+NOTA: Salvo la reorganizacion (parte A), NO se aplicaron fixes de
+bugs. Todo lo de las partes C/D/E es DIAGNOSTICO, pendiente de
+implementar. La auditoria detallada previa sigue vigente:
+ver ANALISIS_SESION_2026-07-14.txt (esos ~40 hallazgos NO se
+duplican aca; solo se corrigen/actualizan donde corresponde).
+
+Herramienta de verificacion usada: MSBuild + ClangCL
+(VS 18 Community). Config que corresponde a Release/ByxStorm.dll:
+Release | x86. Comando:
+  MSBuild ByxStorm.sln /t:Build /p:Configuration=Release /p:Platform=x86
+
+
+============================================================
+A. LO QUE SE CAMBIO ESTA SESION (aplicado y verificado)
+============================================================
+
+Baseline antes de tocar nada: Release|x86 compila (0 errores,
+116 warnings). Se hizo backup completo de src/ + proyecto porque
+esto NO es un repo git (sin red de VCS).
+
+A.1  Basura eliminada
+     - src/Utils/Math/*.o (buffer.o, hde32.o, hde64.o, hook.o,
+       trampoline.o): objetos sueltos de un compilado manual viejo,
+       NO estaban en el build. Borrados.
+
+A.2  Reestructuracion fisica de src/App/Features/
+     Antes: 8 features sueltas en la raiz de Features/ mezcladas con
+     subcarpetas (Aimbot/, ESP/, Menu/, Misc/). Ahora agrupadas:
+       Movement/ <- AutoDuck, AutoStrafe, Bunnyhop
+       Weapon/   <- RapidFire, NoRecoil
+       Camera/   <- Thirdperson, ViewModel
+       (MiscTools.cpp/.h quedan en la raiz de Features/: es el
+        multi-tool agregado; meterlo en Misc/ lo confundiria con
+        ese namespace.)
+     Se corrigieron todos los #include afectados (internos de los
+     .h movidos: ../../SDK -> ../../../SDK; y los referrers en
+     ImguiMenu.cpp, Copy_Command.cpp, CBasePlayer_CalcPlayerView.cpp,
+     IEngineVGuiInternal_Paint.cpp).
+
+A.3  ByxStorm.vcxproj sincronizado con el disco
+     - Rutas de los 6 .cpp movidos actualizadas.
+     - Se agregaron ~20 headers que existian en disco pero NO
+       figuraban en el proyecto (no se veian en VS): todos los .h
+       de features (Aimbot*, ESP*, AutoDuck, etc.), NoSpread.h,
+       DebugLog.h, etc.
+     - Los 4 .cpp que NO se compilan se marcaron como <None> (se ven
+       en VS, no entran al build): Aimbot.cpp, AutoPistol.cpp,
+       ChatSpam.cpp, INetChannel_SendNetMsg.cpp (ver C.1 y C.2).
+
+A.4  ByxStorm.vcxproj.filters regenerado desde cero
+     - Antes: referenciaba un archivo fantasma (App/Features/Globals.h
+       que NO existe) y ~60% de los archivos no tenian filtro (salian
+       sueltos en la raiz del Solution Explorer).
+     - Ahora: 38 filtros que ESPEJAN el arbol fisico real, con cada
+       archivo (source/header/none) ubicado en su carpeta.
+
+VERIFICACION: tras todos los cambios, Rebuild Release|x86 =
+0 errores, mismas 116 warnings que el baseline. DLL regenerado OK.
+
+
+============================================================
+B. HALLAZGO CRITICO DE BUILD (verificado)
+============================================================
+
+B.1  [ROMPE COMPILACION] El build DEBUG no compila
+     Archivo: src/Utils/Memory/Memory.cpp lineas 64 y 106
+       MessageBox(nullptr, fmt::format("... {} ...", sig).c_str(), ...)
+     Dos identificadores no declarados en ese scope:
+       - 'fmt'  : no hay #include de fmt ni using; no existe en el TU.
+       - 'sig'  : el parametro real de la funcion se llama 'szPattern',
+                  no 'sig'.
+     Ese codigo esta bajo #ifdef DEBUG_SIG (activo solo en _DEBUG),
+     por eso Release compila y Debug NO. Confirmado empiricamente:
+       Debug|x86 -> error: use of undeclared identifier 'fmt' / 'sig'
+     (Actualiza el hallazgo 4.4 #10 de la auditoria previa, que solo
+     mencionaba 'sig'; en realidad 'fmt' tambien falta.)
+     Fix minimo (cuando se implemente): usar std::format + szPattern,
+     o quitar/loguear por Debug::Log en vez de fmt/MessageBox.
+
+
+============================================================
+C. HALLAZGOS NUEVOS DE ESTRUCTURA (verificados) + CORRECCIONES
+   A LA AUDITORIA PREVIA
+============================================================
+
+C.1  [CORRIGE AUDITORIA 4.3 #11] El hook INetChannel_SendNetMsg
+     NUNCA se compilaba -> el bug de "return true en overflow" es
+     MOOT hoy
+     Archivo: src/App/Hooks/INetChannel_SendNetMsg.cpp
+     El .cpp NO estaba en el vcxproj y no se #include en ningun lado
+     => nunca entro al DLL. Existe la firma
+     (Signatures.h:11 MAKE_SIGNATURE(INetChannel_SendNetMsg,...)) pero
+     el hook jamas se instala. La auditoria previa (4.3 #11) lo trato
+     como hook vivo con un bug de perdida de input; en realidad ese
+     hook esta AUSENTE del build.
+     Decision de esta sesion: se dejo como <None> (visible, sin
+     compilar). NO se activo, porque activarlo cambiaria el
+     comportamiento en runtime (y ademas arrastraria el bug 4.3 #11).
+     Pendiente de decision del usuario: activarlo+arreglarlo, o
+     eliminarlo.
+
+C.2  [DEAD CODE confirmado a nivel build] .cpp que no se compilan
+     Archivos: Aimbot.cpp, Misc/AutoPistol.cpp, Misc/ChatSpam.cpp
+     Confirma a nivel de build los hallazgos 4.1 #6, 4.3 #6/#7 de la
+     auditoria: no estan en el vcxproj => literalmente fuera del DLL.
+     No solo son "inalcanzables" por logica, ni siquiera se compilan.
+
+C.3  [CAPA STORM INERTE] Todo src/Storm/ esta muerto en runtime
+     - HooksStorm.cpp (339 lineas): esta 100% dentro de bloques
+       comentados /* */. Se compila (esta en ClCompile) pero no emite
+       nada. Sus 13 MAKE_HOOK (Interpolate, Process_Movement,
+       Finish_Move, Run_Command, C_BaseEntity_EstimateAbsVelocity,
+       Spawn_Grenade, etc.) estan todos comentados. Incluye un
+       comentario /* anidado (linea 70) que genera warning del
+       compilador (-Wcomment).
+     - HookStormOthers.hpp (2155 lineas): se #include en DllMain.cpp
+       pero NO tiene ningun MAKE_HOOK y ninguna de sus funciones
+       (Redirected_Send_Move @1159, etc.) es llamada por codigo vivo
+       -> su unico caller (HooksStorm.cpp:336) esta comentado. Es un
+       bloque grande de codigo muerto compilado dentro del TU de
+       DllMain.
+     - DllMain.cpp:47-48 lo confirma explicitamente:
+       "TODO: agregar hooks con firmas... Por ahora solo vtable hooks".
+     Implicancia: hoy la capa Storm no aporta riesgo de runtime (esta
+     apagada), PERO si se reactiva necesita su PROPIA auditoria
+     profunda: son 2500+ lineas de hooking crudo por offsets fijos
+     (client.dll + N) y Byte_Manager::Set_Bytes/Copy_Bytes, con los
+     mismos riesgos que ya marca la auditoria en 4.4 #6/#8 (parches
+     que no se restauran, VirtualProtect sin chequear). NO reactivar
+     sin revisar.
+
+
+============================================================
+D. WARNINGS DE COMPILACION (Release, 116 total)
+============================================================
+
+La gran mayoria son de TERCEROS y no vale la pena tocarlos:
+  - json.hpp: -Wdeprecated-literal-operator (nlohmann json, upstream).
+
+Propios / vale la pena mirar:
+  D.1  src/SDK/L4D2/ISurface.h:97
+       class __attribute__((thiscall)) ISurface : public IAppSystem
+       "'thiscall' attribute only applies to functions and methods".
+       Aplicar thiscall a una CLASE no hace nada (se ignora). La
+       intencion era la convencion por-metodo. Cosmetico, pero es un
+       atributo mal puesto que puede confundir. Bajo impacto.
+  D.2  src/Storm/Hooks/HooksStorm.cpp:70
+       '/*' within block comment (-Wcomment). Es el comentario
+       anidado de la seccion muerta (ver C.3). Inofensivo.
+
+
+============================================================
+E. BUGS DE RUNTIME YA DOCUMENTADOS (siguen SIN corregir)
+============================================================
+
+Esta sesion NO re-audito linea por linea App/Features ni el core de
+Utils: eso ya esta cubierto en detalle en ANALISIS_SESION_2026-07-14.txt
+(~40 hallazgos). Siguen todos vigentes/sin aplicar. Los mas criticos,
+como recordatorio y con verificacion cruzada de esta sesion:
+
+  - 4.4 #2/#4: HookManager/SignatureManager se tragan fallos en
+    silencio (AssertFatal comentados). Sin cambios.
+  - 4.4 #3: shutdown por F11 sin sincronizar con el render thread
+    (use-after-free potencial). DllMain.cpp:24-26 sigue igual
+    (App->Shutdown(); Sleep(500)). Sin cambios.
+  - 4.4 #6/#8: parches via Redirect_Function no se restauran;
+    VirtualProtect sin chequear. (Hoy mitigado de facto porque la
+    capa Storm que los usaba esta inerte -> ver C.3, pero el codigo
+    de BytePatchManager/Memory sigue con el defecto.)
+  - 4.4 #9: Memory.cpp:85 underflow unsigned en el loop de scan
+    (i < image_size - signature_size). Confirmado presente en el
+    codigo actual. Sin cambios.
+  - 4.2 #1: EndScene sin manejo de device lost/reset de DX9. Sin
+    cambios.
+  - 4.3 #1/#2/#3: NoSpread (crash Random_Type / ejes invertidos) y
+    AutoDuck en true por defecto. Sin cambios.
+  - Seccion 3: formula de perfectDelta en AutoStrafe. Sin cambios.
+  (Lista completa y prioridad de fixes: ver el doc del 2026-07-14,
+   seccion 5.)
+
+
+============================================================
+F. RESUMEN / PROXIMOS PASOS SUGERIDOS
+============================================================
+
+Aplicado y verde: reorganizacion (A), sin cambios de comportamiento.
+Pendiente de decidir por el usuario (nada de esto se toco):
+
+  1. Arreglar el build DEBUG (B.1) - es la unica cosa que impide
+     compilar en Debug hoy; fix trivial en Memory.cpp.
+  2. Decidir destino de INetChannel_SendNetMsg.cpp (C.1): activar+
+     arreglar, o eliminar.
+  3. Decidir destino del codigo muerto: Aimbot.cpp, AutoPistol.cpp,
+     ChatSpam.cpp (C.2) y toda la capa Storm (C.3) - eliminar o
+     reactivar-con-auditoria.
+  4. Empezar los fixes de runtime por la prioridad del doc
+     2026-07-14 (seccion 5), empezando por HookManager/Signature
+     silenciosos y el shutdown por F11.
+
+============================================================
+FIN
+============================================================

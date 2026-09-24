@@ -1,0 +1,651 @@
+============================================================
+ BYX STORM - RESUMEN DE ANALISIS Y BUGS DETECTADOS
+ Sesion: 2026-07-14
+============================================================
+
+NOTA IMPORTANTE:
+Este documento resume UNICAMENTE lo que se investigo y discutio en
+esta sesion de analisis. NINGUN fix fue aplicado al codigo todavia -
+todo lo listado abajo es DIAGNOSTICO PENDIENTE DE IMPLEMENTAR.
+
+Esta sesion NO cubrio (si buscas esto, no esta en este documento
+porque no se trabajo aca): hook de PaintTraverse, correcciones de
+calling convention, offsets de punteros de interfaces, ni problemas
+de alineacion con ClangCL. Si esos temas se resolvieron en otra
+sesion/chat, hay que traer ese contexto por separado.
+
+============================================================
+1. ESTRUCTURA DEL PROYECTO (relevado en esta sesion)
+============================================================
+
+Cheat interno (DLL de inyeccion) para Left 4 Dead 2, en C++,
+compilado con MSVC/ClangCL como DynamicLibrary. Se inyecta en el
+proceso del juego, espera a que "mss32.dll" este cargado
+(DllMain.cpp) y luego hookea client.dll/engine.dll via MinHook.
+
+Carpetas principales:
+- src/SDK/         -> SDK reconstruido de Source Engine / L4D2
+                      (interfaces, netvars, tipos de entidades)
+- src/Utils/        -> Infra generica: HookManager (sobre MinHook),
+                      SignatureManager (byte-pattern scanning),
+                      BytePatchManager, InterfaceManager, Memory,
+                      Singleton, Config (JSON/nlohmann)
+- src/App/Features/ -> Features del cheat (Aimbot, ESP, Menu ImGui,
+                      Misc, Movement)
+- src/App/Hooks/    -> Hooks concretos (Copy_Command, CalcPlayerView,
+                      EndScene, INetChannel_SendNetMsg, etc.)
+- src/Storm/        -> Codigo/base "Storm" de referencia (mayormente
+                      comentado / no activo)
+- Release/          -> Build compilado (ByxStorm.dll)
+
+Entry point: src/DllMain.cpp
+  - DllMain crea un hilo (MainThread) que espera mss32.dll, llama
+    App::Start(), y espera F11 para llamar App::Shutdown() y
+    descargar la DLL.
+
+Orden de inicializacion (App.cpp):
+  SignatureManager::InitializeAllSignatures()
+  -> BytePatchManager::InitializeAllBytePatches()
+  -> InterfaceManager::InitializeAllInterfaces()
+  -> HookManager::InitializeAllHooks()
+
+Pipeline de hooks documentado (de BYX_STORM_PARTE2.txt, ya existia
+antes de esta sesion, no generado por nosotros):
+  Copy_Command (por tick): AutoDuck -> Bunnyhop -> AutoStrafe ->
+    Triggerbot -> RapidFire -> Rage Aimbot -> Legit Aimbot ->
+    MiscTools -> NoSpread -> CALL_ORIGINAL
+  CalcPlayerView (por frame): CALL_ORIGINAL -> Thirdperson ->
+    Silent Aim -> NoRecoil
+  Paint: UpdateW2SMatrix -> ESP::Render -> MiscTools::Paint ->
+    FOV Circle
+
+
+============================================================
+2. REVISION: Bunnyhop.cpp
+============================================================
+
+Archivo: src/App/Features/Bunnyhop.cpp
+
+VEREDICTO: Correcto. Es la tecnica estandar de "zero-delay bhop":
+limpia IN_JUMP mientras el jugador esta en el aire
+(!m_hGroundEntity().IsValid()), lo que evita que el motor detecte
+"boton ya estaba apretado" (mv->m_nOldButtons & IN_JUMP) al aterrizar,
+permitiendo salto automatico sin soltar la tecla.
+
+Sugerencia menor (no aplicada): filtrar tambien por moveType
+(noclip/observer) igual que se hace en AutoStrafe, para evitar
+limpiar IN_JUMP innecesariamente en esos estados. Impacto: bajo,
+inofensivo tal como esta.
+
+
+============================================================
+3. REVISION: AutoStrafe.cpp - BUG CONFIRMADO
+============================================================
+
+Archivo: src/App/Features/AutoStrafe.cpp
+
+La estructura general (calcular velDir y wishAng relativos al yaw,
+rotar +-perfectDelta, reconvertir a forwardmove/sidemove) es correcta
+y el round-trip de signos entre wishAng = atan2(-sidemove, forwardmove)
+y sidemove = -sin(moveDir) es consistente.
+
+BUG: el calculo de perfectDelta esta mal.
+
+Codigo actual:
+    const float maxSpeed = 1000.f;
+    const float airAccel = 1000.f;
+    const float wishSpeed = 1000.f;
+    float term = (wishSpeed / airAccel) / maxSpeed * 400.f / speed;
+
+Con los 3 valores iguales a 1000, la formula se reduce literalmente a
+term = 0.4f / speed, sin importar los valores de las 3 constantes (se
+cancelan entre si). Consecuencias:
+  - term es casi siempre ~0 para cualquier velocidad razonable
+    (>50 u/s) -> perfectDelta da practicamente siempre ~90 grados
+    constante, sin importar la velocidad actual.
+  - El bloque de clamp (term <= -1 || term >= 1) es codigo muerto:
+    term nunca llega a esos extremos con esta formula.
+  - Falta el frametime/tick interval (I::GlobalVars->interval_per_tick)
+    por completo - la ganancia de aceleracion depende del tiempo
+    entre ticks y no aparece en ningun lado.
+  - "maxSpeed" no corresponde a nada en la formula real de
+    CGameMovement::AirAccelerate - probablemente confundido con
+    sv_maxspeed.
+  - "airAccel" esta hardcodeado en 1000 en vez de leer el cvar real
+    sv_airaccelerate (Source engine por defecto ronda 10-12; muchos
+    servers de bhop/surf lo cambian).
+
+FORMULA CORRECTA (derivada de CGameMovement::AirAccelerate,
+consistente con lo que usan bots TAS/bhop conocidos, ej. hlstrafe):
+
+    a = airAccel * wishSpeed * frametime * surfaceFriction
+    cos(theta) = clamp((wishSpeed - a) / speed, -1, 1)
+    theta = acos(cos(theta))
+
+Fix propuesto (NO aplicado todavia al codigo):
+
+    float tickInterval = I::GlobalVars->interval_per_tick;
+    float airAccel = /* leer sv_airaccelerate real via ConVar */;
+    float wishSpeed = 30.f; // cap hardcodeado del engine para air wishspeed
+
+    float a = airAccel * wishSpeed * tickInterval /* * surfaceFriction */;
+    float term = (wishSpeed - a) / speed;
+    term = std::clamp(term, -1.f, 1.f);
+    float perfectDelta = acosf(term);
+
+Efecto esperado del fix: el angulo de giro pasa de ser ~90 grados
+constante (ineficiente a baja velocidad, justo despues de saltar) a
+una curva que arranca chico a baja velocidad y crece hacia ~90 grados
+a medida que se acelera - ganancia de velocidad mas eficiente y
+consistente, movimiento menos "robotico", y se adapta al
+sv_airaccelerate real del server en vez de estar sintonizado a un
+valor hardcodeado que no coincide con nada.
+
+Pendiente de verificar empiricamente: la convencion de signo de
+sidemove ("right" vs "left") - si el strafe curva para el lado
+contrario al esperado, es un simple flip de signo, no un problema
+estructural.
+
+
+============================================================
+4. BUG HUNT COMPLETO (4 subsistemas revisados en paralelo)
+============================================================
+
+------------------------------------------------------------
+4.1 AIMBOT (Aimbot.cpp/.h, Aimbot_Rage, Aimbot_Legit,
+    Aimbot_Common, Triggerbot, CBasePlayer_CalcPlayerView.cpp,
+    Copy_Command.cpp)
+------------------------------------------------------------
+
+[CRASH] #1 - Indice de hitbox sin validar
+  Archivo: Aimbot_Common.cpp lineas 214-217 (Rage) y 285-291 (Legit)
+  GetHitboxPosition() usa cfg.nBone (configurable por el usuario, sin
+  clamp) o valores de kStormHitboxes contra pAnim->GetHitboxPos(nHitbox),
+  que en studio.h:914 NO valida bounds. Si el indice excede
+  numhitboxes real del modelo, lee un mstudiobbox_t basura y de ahi
+  un ->bone basura que indexa BoneMatrix[128] - puede crashear el
+  juego. La funcion muerta Aimbot.cpp::GetBonePos SI valida
+  (bid<0||bid>=128), pero el camino que realmente se ejecuta no.
+
+[FEATURE ROTA] #2 - Target Witch no funciona sin Target Commons
+  Archivo: Aimbot_Common.cpp lineas 242 y 320
+  Witches viven en el mismo rango de indices que los commons, que
+  solo se escanea si cfg.bTarget_Commons esta activo. Si el usuario
+  activa "Target Witch" pero no "Target Commons" (combinacion
+  logica), el aimbot nunca adquiere Witch, en silencio.
+
+[FEATURE ROTA] #3 - Silent aim override ignora bEnabled
+  Archivo: CBasePlayer_CalcPlayerView.cpp linea 18
+  bool bSilent = Rage::cfg.bSilent || Legit::cfg.bSilent;
+  RageConfig por defecto tiene bEnabled=false, bSilent=true. El OR
+  nunca chequea bEnabled. Si solo usas Legit con bSilent=false
+  (querés ver la camara girar), Rage sigue "presente" con
+  bSilent=true por default y este hook fuerza el angulo real cada
+  frame, cancelando el aim visible de Legit.
+
+[BUG LOGICO] #4 - Reuso de target sin chequear identidad de entidad
+  Archivo: Aimbot_Common.cpp lineas 76-91, 180-183, 193/262, 210/282
+  state.posHistory/velHistory/resolverData/lastTarget estan indexados
+  solo por entindex(). IsEntityValid solo chequea pCE && !IsDormant(),
+  nunca verifica que sea la MISMA entidad. Cuando un infectado muere
+  y otro spawnea en el mismo slot (comun en L4D2), hereda historial
+  de una criatura distinta -> picos de velocidad predicha falsos.
+
+[BUG LOGICO] #5 - Fallback de switch-delay no revalida el target
+  Archivo: Aimbot_Common.cpp lineas 246-248 (Rage), 324-326 (Legit)
+  Si aparece un target mejor pero no paso flSwitchDelay, se descarta
+  "best" y se sustituye por el target cacheado anterior SIN
+  re-validar FOV/vision/salud ese frame. Si el target lockeado murio
+  o quedo oculto el mismo tick, el bot sigue apuntando/disparando al
+  anterior (a traves de pared o a un cadaver) hasta que expire el delay.
+
+[DEAD CODE] #6 - Features::Aimbot::Run() nunca se llama
+  Archivos: Aimbot.cpp, Aimbot.h
+  Copy_Command.cpp solo llama a Rage::Run y Legit::Run. El Aimbot.cpp
+  standalone (con sus propios globals bEnabled/bTargetLock/flFOV/etc)
+  no se referencia en ningun otro lado - si algun panel de UI esta
+  atado a esos globals, no hace nada. (Ademas tiene su propio bug de
+  timer de target-lock que solo se actualiza al cambiar de target, no
+  cada tick - moot mientras el archivo este inalcanzable).
+
+[DISEÑO] #7 - Rage y Legit sin exclusion mutua
+  Archivo: Copy_Command.cpp lineas 31-32
+  Ambos corren sin condicion cada tick. Si los dos estan activados,
+  Legit corre segundo y pisa el viewangle que puso Rage el mismo
+  tick -> aim visiblemente peleando/tembloroso.
+
+[FRAGIL] #8 - Offset crudo para lag-comp tick count
+  Archivo: Aimbot_Common.cpp lineas 238 y 316
+  float flSimTime = *(float*)((DWORD_PTR)pEnt+0x150);
+  Existe NETVAR(m_flSimulationTime) dinamico en el SDK
+  (c_baseentity.h:233) que se resuelve en runtime, pero este codigo
+  usa un offset crudo 0x150 en su lugar. Si 0x150 no coincide con el
+  offset real del build del juego (los netvars se mueven entre
+  updates - por eso existe el sistema dinamico), flSimTime sale
+  basura y tick_count se corrompe cada tick que hay target.
+
+[MENOR] #9 - SmoothAngle siempre pone roll en 0
+  Archivo: Aimbot_Common.cpp linea 156
+  return Vec3(vCur.x+dx*t, vCur.y+dy*t, 0) - descarta el componente Z
+  en vez de pasar vCur.z/vTgt.z. Impacto bajo (roll normalmente es 0
+  en jugadores Source), pero es un descarte silencioso.
+
+[MENOR] #10 - Mapas de historial nunca se podan
+  Archivo: Aimbot_Common.cpp
+  state.posHistory/velHistory/resolverData (std::map<int,...>) solo
+  recortan cada VECTOR interno a 8/5/12 entradas, pero nunca borran
+  la entrada del mapa externo cuando una entidad deja de aparecer
+  (muere/se remueve). En sesiones largas con muchos commons
+  spawneando, esto crece sin limite - memory leak lento, y es el
+  mecanismo subyacente que habilita el bug #4.
+
+No reportado como bug (verificado, se ve correcto):
+  Math::VectorAngles/ClampAngles/NormalizeAngle y CalcAngle en
+  Math.h manejan bien el wraparound de angulos via std::remainder;
+  GetFOVToTarget/SmoothAngle en la Aimbot_Common.cpp viva normalizan
+  bien el delta de angulo; null checks en pLocal/pCmd/pAnim/pTerror
+  presentes y bien ubicados en los caminos vivos de Rage/Legit/
+  Triggerbot; la formula "reversed delta" de CalcAngle en Math.h es
+  matematicamente auto-consistente (verificado a mano con casos
+  cardinales) aunque a primera vista parezca al reves.
+
+
+------------------------------------------------------------
+4.2 ESP / RENDER (ESP.cpp/.h, ESPSettings, States, Weapons,
+    EndScene, IEngineVGuiInternal_Paint, ISurface_*,
+    CViewRender_RenderView, WINAPI_WndProc, ImguiMenu, Draw.h)
+------------------------------------------------------------
+
+[CRASH] #1 - Sin manejo de device lost/reset de DX9
+  Archivo: EndScene.cpp linea 8
+  No hay hook de IDirect3DDevice9::Reset ni chequeo de
+  TestCooperativeLevel. Los buffers de vertices/indices/fuente de
+  ImGui estan creados con D3DPOOL_DEFAULT (confirmado en
+  imgui_impl_dx9.cpp lineas 171/178/380), que se invalida en el
+  Reset() del driver. Alt-tab desde fullscreen exclusivo o cambio de
+  resolucion deja el siguiente EndScene/RenderDrawData usando
+  punteros D3D9 colgantes -> access violation o overlay corrupto.
+
+[CRASH] #2 - Falta chequeo de bone index negativo
+  Archivo: ESP.cpp linea 45
+  GBounds() chequea bx->bone>=128 pero nunca bx->bone<0.
+  mstudiobbox_t::bone (studio.h:252) es un int con signo sin garantia
+  de limite inferior; un valor negativo en b[bx->bone] (linea 47) lee
+  fuera de bounds del array matrix3x4_t bones[128].
+
+[LEAK] #3 - Handles de fuente nunca se liberan al recargar
+  Archivo: SDK/Helpers/Fonts/Fonts.cpp linea 3
+  CFontManager::Reload() (invocado desde ISurface_OnScreenSizeChanged
+  en cada evento de resize) llama CreateFont() para las 4 fuentes y
+  pisa el handle viejo m_dwFont sin liberarlo - leak de un font
+  object por fuente por cada resize/alt-tab.
+
+[BUG FUNCIONAL] #4 - Fade de ESP de muertos solo funciona una vez
+  Archivo: ESP.cpp lineas 90-97
+  Las entradas de sDeathTimes nunca se borran cuando la entidad
+  respawnea. En la segunda muerte de un jugador, se reusa el
+  timestamp viejo, dt queda inmediatamente >= flLastTime, y el fade
+  de "Dead" deja de renderizarse en silencio para ese slot por el
+  resto de la sesion.
+
+[BUG DE INPUT] #5 - WndProc se come todos los mensajes con el menu abierto
+  Archivo: WINAPI_WndProc.cpp linea 7
+  Con el menu abierto, el hook devuelve incondicionalmente 1 para
+  cualquier mensaje que ImGui no reclama, en vez de reenviarlo con
+  CallWindowProc(Original,...). WM_CLOSE, WM_SIZE, WM_SYSCOMMAND,
+  WM_ACTIVATEAPP etc. nunca llegan al proc real mientras el menu esta
+  abierto (ej: cerrar la ventana no hace nada).
+
+[MENOR] #6 - Fallback de screen-size inconsistente
+  Archivo: ESP.cpp linea 60
+  sh recibe fallback de 1080 si sw<=0, pero sw mismo nunca se
+  corrige, produciendo un origen de snapline basura (0, 1080) si
+  GetScreenW() devuelve 0 (ej. antes de que
+  ISurface_OnScreenSizeChanged haya poblado el tamaño cacheado).
+
+[MENOR/PERF] #7 - Llamado duplicado a SetupBones
+  Archivo: ESP.cpp linea 42 vs 56
+  RenderTarget() ya llama SetupBones() antes de invocar GBounds(),
+  que inmediatamente llama SetupBones() de nuevo sobre el mismo
+  buffer - computo de matrices de hueso desperdiciado cada frame por
+  cada entidad animada renderizada.
+
+[LANDMINE] #8 - Declaraciones de header desactualizadas/muertas
+  Archivo: ESPSettings.h lineas 33-35
+  Declara un RenderTarget de 9 parametros (con Color_t clrOverride) y
+  RenderAll(), que no coinciden ni estan definidos por el ESP.cpp
+  real (RenderTarget de 8 parametros, Render()). Inofensivo hoy
+  porque nada los llama, pero es un error de linker esperando pasar
+  si alguien edita confiando en el header.
+
+
+------------------------------------------------------------
+4.3 MOVEMENT / MISC / NETWORK (AutoDuck, RapidFire, NoRecoil,
+    ViewModel, Thirdperson, MiscTools, Misc/Misc, Misc/NoSpread,
+    Misc/AutoPistol, Misc/ChatSpam, Copy_Command,
+    INetChannel_SendNetMsg, Draw_Effect, Set_Host,
+    IBaseClientDLL_FrameStageNotify, IBaseClientDLL_LevelShutdown)
+------------------------------------------------------------
+
+[CRASH - YA DOCUMENTADO COMO ROTO] #1 - NoSpread llama la funcion
+que los propios docs dicen que crashea
+  Archivo: Misc/NoSpread.cpp lineas 29-33
+  Random_Type (client.dll+0x1ACE30) se invoca directo como puntero a
+  funcion crudo, sin condicion, cada vez que bEnabled=true y se acaba
+  de disparar (cualquier arma). BYX_STORM_PARTE2.txt linea 104 ya
+  admite "Random_Type angle compensation (crash al llamar)". Esta
+  conectado y se ejecuta en vivo.
+
+[BUG VISIBLE] #2 - AutoDuck viene activado por defecto
+  Archivo: AutoDuck.h linea 6: inline bool bAutoDuck = true;
+  Todo el resto de features (RapidFire, NoSpread, ViewModel,
+  Thirdperson, NoRecoil, AutoPistol, ChatSpam, MiscTools) arrancan en
+  false. Copy_Command.cpp llama AutoDuck_Run sin condicion cada tick.
+  Resultado: apenas se inyecta la DLL, antes de tocar el menu, el
+  jugador queda forzado a agachado.
+
+[BUG LOGICO] #3 - NoSpread invierte los ejes horizontal/vertical
+  Archivo: Misc/NoSpread.cpp lineas 32-33
+  viewangles.x -= Rand(HorizSpread) y .y -= Rand(VertSpread). En
+  QAngle de Source, x=pitch (vertical), y=yaw (horizontal) - los ejes
+  estan invertidos. Incluso sin el crash del #1, la "compensacion"
+  gira en el eje equivocado.
+
+[FEATURE ROTA] #4 - NoSpread aplica logica de shotgun a cualquier arma
+  Archivo: Misc/NoSpread.cpp lineas 18-34
+  Las seeds solo estan documentadas/verificadas para classId 2, 148,
+  162/163 (shotguns), pero el bloque de compensacion de angulo
+  (Weapon+0xD0C, Random_Type) se ejecuta para CUALQUIER arma en
+  cualquier tick de ataque valido. Coincide con lo que el propio doc
+  admite: "NoSpread para no-shotguns (seeds no encontrados)".
+
+[BUG TEMPORAL] #5 - RapidFire deja de disparar tras cambio de mapa
+  Archivo: RapidFire.cpp linea 10
+  int t = pCmd->tick_count*16; comparado contra nLastTick estatico
+  que nunca se resetea (IBaseClientDLL_LevelShutdown.cpp solo llama
+  H::Entities->ClearCache()). tick_count reinicia en un mapa nuevo
+  mientras nLastTick conserva el valor grande del mapa anterior ->
+  t-nLastTick da muy negativo -> RapidFire deja de disparar en
+  silencio por potencialmente decenas de minutos tras cualquier
+  transicion de capitulo/mapa. Ademas la constante *16 (ms) asume
+  62.5 tick/s; L4D2 corre a 30 tick por defecto (~33ms), asi que
+  incluso en una ronda estable el delay configurado es ~2x mas largo
+  de lo que el slider sugiere.
+
+[DEAD CODE] #6 - ViewModel::Apply() corre cada frame pero es
+inalcanzable
+  Archivos: ViewModel.cpp/.h, llamado desde
+  IEngineVGuiInternal_Paint.cpp linea 26
+  Sin referencias a Features::ViewModel::bEnabled en ningun checkbox
+  de menu - el usuario nunca puede activarlo. Doblemente roto: ademas
+  el doc dice que los cvars de viewmodel no funcionan en L4D2.
+
+[DEAD CODE] #7 - AutoPistol.cpp y ChatSpam.cpp (namespace Misc)
+huerfanos
+  Archivos: Misc/AutoPistol.cpp, Misc/ChatSpam.cpp
+  Features::AutoPistol::Run y Features::ChatSpam::Run no se
+  referencian en ningun otro lado (no en Copy_Command.cpp, no en
+  ningun hook, no en ImguiMenu.cpp). Nota: MiscTools::bChatSpam es
+  una implementacion SEPARADA que si esta conectada al menu y si
+  funciona - ChatSpam.cpp es un duplicado muerto redundante.
+
+[DEAD CODE] #8 - MiscTools: estado de indicador de daño nunca resetea
+entre niveles
+  Archivo: MiscTools.cpp lineas 9-10 (s_prevHealth, s_dmgNotes)
+  Nunca se limpian en IBaseClientDLL_LevelShutdown.cpp. En transicion
+  de mapa/capitulo, la vida vieja del slot de entidad i se compara
+  contra el nuevo ocupante -> falsos popups de "-N" daño al inicio
+  del mapa; y como I::GlobalVars->curtime se resetea, los timestamps
+  guardados quedan "en el futuro" respecto al nuevo curtime, asi que
+  age=now-stored da negativo y nunca supera flDmgDuration ->
+  notificaciones viejas pueden quedar pegadas en pantalla.
+
+[BUG LOGICO] #9 - Thirdperson: trace anti-clip armado al reves
+  Archivo: Thirdperson.cpp lineas 22-26
+  ray.Init(eyeOrigin+fwd*flCurDist, eyeOrigin) traza desde la posicion
+  candidata (posiblemente dentro de la pared) de vuelta al ojo real,
+  en vez de ojo->camara. Cuando la posicion de camara deseada esta
+  dentro de geometria solida (el caso exacto que este codigo existe
+  para prevenir), un trace que arranca en solido tipicamente devuelve
+  fraction~=0/endpos==start, asi que eyeOrigin=tr.endpos deja la
+  camara en el mismo punto embebido - la prevencion de clipping no
+  hace nada en su caso de uso principal.
+
+[BUG LOGICO] #10 - NoRecoil resta el punch angle dos veces
+  Archivo: CBasePlayer_CalcPlayerView.cpp lineas 19-27
+  eyeAngles se sobreescribe primero con el angulo "limpio" (sin
+  punch, +0x1384), y despues se le resta el punch DE NUEVO
+  (eyeAngles.x -= pPunch[0]*f) sobre ese valor ya limpio. Activar
+  NoRecoil no anula el recoil - lo sobrecorrige, rotando visiblemente
+  la camara en direccion opuesta, proporcional al punch acumulado y a
+  flAmount.
+
+[BUG DE RED] #11 - INetChannel_SendNetMsg descarta comandos en
+overflow pero reporta exito
+  Archivo: INetChannel_SendNetMsg.cpp lineas 58-76
+  Si WriteUsercmdDeltaToBuffer falla (overflow de bf_write), bOK pasa
+  a false, CALL_ORIGINAL se saltea (esta dentro del if(bOK)), pero el
+  hook igual hace return true incondicional en la linea 76 -
+  informandole al engine que el mensaje se proceso. En un pico grande
+  de choke que desborde el empaquetado, el comando de movimiento de
+  ese paquete se pierde en silencio sin fallback al mensaje original
+  -> input loss/rubber-banding invisible.
+
+[DEAD CODE] #12 - CMisc::Bunnyhop/AutoStrafer son stubs vacios,
+totalmente huerfanos
+  Archivo: Misc/Misc.cpp lineas 3-9
+  Ambos metodos tienen cuerpo {} vacio. El singleton CMisc/F::Misc no
+  se referencia fuera de sus propios dos archivos - duplicado muerto
+  del Bunnyhop_Run/AutoStrafe_Run real que si funciona (conectado en
+  Copy_Command.cpp). No es dañino (inalcanzable), pero es codigo
+  muerto confuso con nombres que se pueden confundir con la
+  implementacion viva.
+
+[MENOR] #13 - AutoPistol acepta un classId no documentado (141)
+  Archivo: Misc/AutoPistol.cpp linea 15
+  cid==131||cid==116||cid==141 - la tabla de classId de
+  BYX_STORM_PARTE2.txt solo documenta 131 (CPistol) y 116
+  (CMagnumPistol) para pistolas. 141 no tiene fuente/verificacion.
+  Severidad baja ahora porque la feature es inalcanzable (#7), pero
+  vale doble-chequear contra el enum del SDK antes de conectar
+  AutoPistol, por si dispara full-auto en un arma no intencionada.
+
+No reportado como bug (verificado, se ve correcto):
+  El orden del pipeline de hooks en Copy_Command.cpp coincide con lo
+  documentado; el cache clear/update de
+  IBaseClientDLL_FrameStageNotify.cpp esta bien conectado; Set_Host.cpp
+  y Draw_Effect.cpp son stubs de logging intencionales (consistente
+  con "hook existe, feature no construida todavia" segun los docs, no
+  es un bug); las constantes de seed/command_number especificas de
+  shotgun en NoSpread coinciden exactamente con BYX_STORM_PARTE2.txt
+  (2/148/162/163 con los valores documentados).
+
+
+------------------------------------------------------------
+4.4 CORE INFRA (DllMain, App.cpp/.h, HookManager,
+    SignatureManager, BytePatchManager, InterfaceManager, Memory,
+    Config.h, Color, Hash, DebugLog, Singleton, Storm/*)
+------------------------------------------------------------
+
+[CRASH] #1 - Null pointer si falla la resolucion de la interfaz D3D9,
+antes de instalar ningun hook
+  Archivo: EndScene.cpp linea 9
+  MAKE_HOOK(EndScene, Memory::GetVFunc(I::D3D9Device, 42), ...).
+  Memory::GetVFunc (Memory.h:12-15) hace
+  (*static_cast<int**>(pBaseClass))[unIndex] sin chequeo de null.
+  I::D3D9Device se resuelve via MAKE_INTERFACE_SIGNATURE(...,
+  "shaderapidx9.dll", ...) dentro de
+  CInterfaceManager::InitializeAllInterfaces(). El unico gate de
+  "listo" en App::Start() es que mss32.dll este cargado - nada
+  garantiza que shaderapidx9.dll/el device D3D9 ya exista. Si la
+  firma falla o el modulo no cargo todavia cuando corre
+  InitializeAllInterfaces(), I::D3D9Device queda nullptr, y el
+  siguiente paso HookManager->InitializeAllHooks() lo dereferencia de
+  inmediato - crash instantaneo del proceso del juego en el arranque.
+
+[SILENCIOSO] #2 - HookManager traga cualquier fallo de MinHook
+  Archivo: HookManager.cpp lineas 11, 18
+  Los AssertFatal(MH_Initialize()...) y
+  AssertFatal(MH_EnableHook(MH_ALL_HOOKS)...) estan COMENTADOS, y
+  CHook::Create() (HookManager.h:15-18) nunca chequea el retorno de
+  MH_CreateHook. Concretamente explotable: Copy_Command.cpp linea 15
+  pasa Memory::FindSignature("client.dll", "...") directo como
+  direccion destino del hook. Si esa firma alguna vez no matchea
+  (parche del juego, build distinto), FindSignature devuelve 0,
+  MH_CreateHook(nullptr, Func, &m_pOriginal) se llama y su fallo se
+  descarta - el entry point de aimbot/bhop/strafe/triggerbot
+  (Copy_Command) simplemente no se instala, sin error, sin mensaje, y
+  el log de debug de la linea 19 de Copy_Command.cpp nunca dispara
+  para dar la pista.
+
+[CRASH] #3 - Use-after-free en shutdown: hooks se destruyen sin
+sincronizar con el render thread
+  Archivo: App.cpp lineas 40-43
+  Shutdown() llama BytePatchManager->RestoreAllBytePatches() y
+  despues HookManager->FreeAllHooks() (= MH_Uninitialize(),
+  HookManager.h:47-50) ANTES de restaurar el WndProc, y el unico
+  Sleep(250) ocurre DESPUES de ambos. FreeAllHooks() corre en el
+  thread que detecto F11 (DllMain.cpp:20-24), totalmente
+  independiente del render thread, que en ese momento exacto puede
+  estar ejecutando dentro del trampoline de EndScene (que llama a
+  ImGui, EndScene.cpp:29-38). MH_Uninitialize remueve y libera los
+  trampolines de los hooks; si el instruction pointer del render
+  thread esta en ese momento dentro de ese trampoline/detour ya
+  liberado, falla. El Sleep(250) esta mal ubicado (despues del
+  teardown, no antes) e insuficiente por si solo (ningun flag/mutex
+  bloquea la entrada al hook del render thread) - presionar F11
+  durante un frame activo es una ventana de crash real.
+
+[CRASH DIFERIDO] #4 - Un scan de firma fallido no detiene la
+ejecucion, entrega una direccion "resuelta" falsa
+  Archivo: SignatureManager.cpp lineas 16-23; Assert.h linea 9
+  AssertCustom solo hace pop de un MessageBoxA; no hace exit() ni
+  return. Cuando Memory::FindSignature devuelve 0 (no encontrado),
+  Initialize() muestra el messagebox y de todas formas ejecuta
+  m_dwVal += m_nOffset, convirtiendo "no encontrado" en un entero
+  pequeño cercano a null que CSignature::Get() entrega despues como
+  si fuera una direccion valida. Cualquier consumidor (byte patches,
+  direcciones de MAKE_HOOK, aritmetica de Client_Module + offset en
+  Storm/Hooks/HookStormOthers.hpp) va a dereferenciar/saltar a traves
+  de ese puntero falso, crasheando lejos de la causa real. (El
+  MessageBoxA bloqueante en si mismo es tambien un problema: frena el
+  thread de init esperando que un humano clickee OK dentro de un
+  proceso de juego).
+
+[CRASH SILENCIOSO] #5 - Config::Load/Save sin manejo de excepciones
+  Archivo: Config.h linea 84 (input_file >> j;) y lineas 98-123
+  (*static_cast<bool*>(var.m_ptr) = j[var.m_name]; etc.)
+  Un archivo de config corrupto/mal formado tira
+  nlohmann::json::parse_error; una config con un campo del tipo
+  equivocado (ej. un string donde se espera un float) tira type_error
+  durante la conversion implicita. App::Start() llama Config::Load(...)
+  directo (App.cpp:32) sin ningun try/catch en toda la cadena, asi
+  que cualquier default.json editado a mano o escrito parcialmente
+  crashea todo el juego via excepcion C++ no manejada en vez de caer
+  a valores por defecto.
+
+[PARCHES NO SE RESTAURAN] #6 - BytePatchManager se bypassea por los
+helpers reales de parcheo
+  Archivo: BytePatchManager.cpp lineas 17-22
+  InitializeAllBytePatches() esta completamente comentado. Mientras
+  tanto Byte_Manager::Set_Bytes/Copy_Bytes y
+  Redirection_Manager::Redirect_Function (BytePatchManager.h:24-90,
+  duplicado en Memory.h:22-78 como Memory::Redirect_Function/
+  Redirect_FunctionP) hacen VirtualProtect + sobreescriben bytes en
+  client.dll/engine.dll directo (usado en HookStormOthers.hpp, ej.
+  Redirected_Send_Move en la linea 1170) pero nunca registran nada en
+  CBytePatchManager::originalBytes. RestoreAllBytePatches() (llamado
+  desde App::Shutdown(), App.cpp:40) no tiene entonces nada que
+  deshacer para ningun parche aplicado por este camino. Si ese codigo
+  esta activo, el shutdown por F11 deja un stub "push addr; ret"
+  permanente en el modulo destino, y MainThread descarga la DLL del
+  cheat poco despues (DllMain.cpp:26,31) - cualquier llamada posterior
+  a esa funcion redirigida salta a memoria ya liberada/desmapeada.
+
+[SIN PROTECCION] #7 - Loop de dereferencia de InterfaceManager
+chequea el puntero equivocado
+  Archivo: InterfaceManager.cpp lineas 47-51
+  if (Interface->m_pPtr) *Interface->m_pPtr =
+  *reinterpret_cast<void**>(*Interface->m_pPtr);
+  Interface->m_pPtr es &I::nombre, la direccion del puntero global -
+  nunca es null. El chequeo deberia ser sobre *Interface->m_pPtr (la
+  direccion recien resuelta) antes de dereferenciarla de nuevo.
+  Combinado con el hallazgo #4 (un scan "exitoso" que entrega una
+  direccion casi-null) o un offset que se pasa del limite de la
+  imagen mapeada, esta dereferencia queda sin proteccion.
+
+[UB] #8 - Retornos de VirtualProtect nunca se chequean
+  Archivos: BytePatchManager.cpp lineas 6-7, 28-29;
+  BytePatchManager.h lineas 26-90; Memory.h lineas 22-78
+  Cada VirtualProtect(..., &originalProtection) ignora el BOOL de
+  retorno. Si falla, originalProtection queda sin inicializar
+  (comportamiento indefinido leerlo), y ese valor basura es el que se
+  aplica despues como proteccion "de vuelta" - potencialmente dejando
+  paginas del target con flags de proteccion equivocados (ej. codigo
+  no-ejecutable, o RWX permanente) en vez de fallar ruidosamente.
+
+[UNDERFLOW] #9 - Memory::FindSignature puede desbordar su limite de
+scan
+  Archivo: Memory.cpp linea 85
+  for (auto i = 0ul; i < image_size - signature_size; ++i) con ambos
+  operandos unsigned. Si signature_size > image_size (un patron mal
+  configurado/sobredimensionado, o escanear un modulo inusualmente
+  chico/parcialmente mapeado), la resta da underflow a un valor
+  enorme y el loop lee muy fuera de la memoria del modulo, crasheando
+  con access violation en vez de simplemente devolver "no encontrado".
+
+[NO COMPILA EN DEBUG] #10 - Path de debug de FindSignature referencia
+un identificador indefinido
+  Archivo: Memory.cpp lineas 64, 106
+  fmt::format("GetModuleInformation {} failed\n", sig) (y la segunda
+  ocurrencia) referencian sig, pero el parametro de la funcion es
+  szPattern - no hay ningun sig en scope. Como DEBUG_SIG solo esta
+  definido bajo _DEBUG (Memory.cpp:55-56), esto significa que
+  cualquier build en configuracion Debug de esta translation unit no
+  compila.
+
+[LATENTE, HOY INERTE] #11 - Race en Client_Module/Engine_Module en
+DllMain
+  Archivo: DllMain.cpp lineas 39-45
+  CreateThread(..., MainThread, ...) se lanza ANTES de que
+  Client_Module/Engine_Module se asignen, sin ninguna primitiva de
+  sincronizacion entre las escrituras del thread cargador y las
+  lecturas de MainThread. Hoy es inerte - cada hook/util de Storm
+  recalcula su propio GetModuleHandleW(L"client.dll")/"engine.dll"
+  localmente en vez de leer estos dos globals (confirmado: solo
+  DllMain.cpp los lee, para logging) - pero es una mina para el
+  futuro si algun codigo nuevo confia en que estos globals estan
+  "listos" apenas arranca MainThread.
+
+Nota adicional: Storm/Hooks/HooksStorm.cpp esta completamente
+comentado salvo los includes - ninguna firma/hook de ese archivo esta
+activa hoy; los hooks reales en produccion viven en App/Hooks/*.cpp.
+
+
+============================================================
+5. PRIORIDAD SUGERIDA DE FIXES (si hay que elegir por donde empezar)
+============================================================
+
+1. Reactivar los AssertFatal/chequeos de retorno en HookManager y
+   SignatureManager (4.4 #2, #4) - hoy un hook o firma puede fallar
+   en total silencio y nadie se entera.
+2. Reordenar/sincronizar el shutdown por F11 (4.4 #3) - la forma mas
+   facil de crashear el juego en una sesion real tal como esta hoy.
+3. BytePatchManager no restaurando los parches reales aplicados via
+   Redirect_Function (4.4 #6) - deja memoria del proceso corrupta
+   despues de que la DLL se descarga.
+4. AutoDuck en true por defecto (4.3 #2) - trivial de arreglar, muy
+   visible apenas se inyecta la DLL.
+5. NoSpread: sacarlo del pipeline o al menos gatear la llamada a
+   Random_Type que los propios docs admiten que crashea (4.3 #1),
+   y corregir la inversion de ejes pitch/yaw (4.3 #3).
+6. Fix de la formula de AutoStrafe (seccion 3 de este documento).
+7. Validacion de indice de hitbox en Aimbot_Common.cpp (4.1 #1) y
+   chequeo de bone negativo en ESP.cpp (4.2 #2) - ambos son lecturas
+   fuera de rango con riesgo de crash.
+8. Manejo de device lost/reset de DX9 en EndScene (4.2 #1) - crash
+   garantizado en cualquier alt-tab desde fullscreen exclusivo.
+
+============================================================
+FIN DEL DOCUMENTO
+============================================================

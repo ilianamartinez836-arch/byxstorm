@@ -1,0 +1,167 @@
+============================================================
+ BYX STORM - TODAS LAS FEATURES (IMPLEMENTADAS Y PENDIENTES)
+============================================================
+
+FUENTES: Storm, referencias externas varias
+FECHA: Julio 2026
+
+============================================================
+✅ YA IMPLEMENTADO EN BYX STORM
+============================================================
+
+🎯 AIMBOT
+  - Rage (HvH): FOV 360, Smooth 2, Silent ON, Threat Priority,
+    Lethal Priority, Dynamic Bones, Resolver, Target Lock,
+    Auto-Direction, Auto-Shoot, Auto-Crouch, Auto-Stop
+  - Legit (Closet): FOV 45, Smooth 25, VisCheck ON, Auto-Scope,
+    Bone-by-Dist, Grace Period, Aim Delay, Switch Delay
+  - Triggerbot: FOV configurable, Auto-Fire Rate, VisCheck
+  - Silent Aim (Storm architecture - CalcPlayerView hook)
+  - Lag Compensation (target tick applied to pCmd->tick_count)
+  - Hitbox Map (Storm per-ClassId: Charger=9, Hunter=10, etc.)
+  - Keybinds (captura de tecla custom)
+  - FOV Circle (dinamico, formula corregida con game FOV)
+
+🏃 MOVEMENT
+  - Bunnyhop (zero-delay con m_hGroundEntity)
+  - Auto Strafe (perfect delta)
+  - Auto Duck
+
+👁️ ESP
+  - Dynamic boxes (hitbox-based via SetupBones)
+  - Bones (17 huesos, 2 formatos)
+  - Health bar + numero
+  - States [DOWN][SMOKER][HANGING]
+  - Weapon names (GetModelName)
+  - Ghosts / Deads
+  - Snapline, Head Dot
+  - 7 tabs independientes + colores custom
+
+🔫 NO-SPREAD (WIP)
+  - Metodo 1: Byte patch 0F95C24A23C2 - no funciona
+  - Metodo 2: ChargerTurn+85 - rompe mov
+  - Metodo 3: Seeds + UpdateSpread(0x30CAD0) - shotgun OK
+  - Metodo 4: Storm seeds solo - shotgun OK
+  - Metodo 5: INetChannel seed=0 - no funciona
+  - Metodo 6: Angle compensation (Random_Type) - WIP
+
+🪝 HOOKS ACTIVOS
+  Copy_Command, CalcPlayerView, Set_Host, Draw_Effect,
+  INetChannel_SendNetMsg, FrameStageNotify, LevelShutdown,
+  EndScene, Paint, LockCursor, OnScreenSizeChanged,
+  RenderView, WndProc
+
+🎨 MENU
+  - Tema oscuro azul marino
+  - Tabs: Movement, Aimbot(Rage+Legit), Triggerbot, ESP,
+    No-Spread, Misc
+  - Keybind system
+  - Bone selector (Head, Neck, Chest, Pelvis...)
+  - Watermark FPS
+
+============================================================
+📋 PENDIENTE - EXTRAIDO DE STORM
+============================================================
+
+Auto-Shove            Push automatico + shotgun shove
+Fire_Bullet Valid.    Validacion de tiro REAL (no simple trace)
+Random_Type Comp.     Compensacion de angulo post-disparo
+Backtrack             Tickbase manipulation (Run_Command + Post_Network)
+No Interpolation      Desactiva interp en enemigos
+Pitch Unclamp         Finish_Move - permite mirar recto arriba/abajo
+Spitter Mod           Cooldown de spit modificado
+Chainsaw Cycle        Tracking de ciclo de motosierra
+Speedhack             Extra commands loop (parcialmente en DllMain)
+Damage Calc           Calculo REAL de dano (server.dll)
+
+============================================================
+📋 PENDIENTE - EXPLOITS Y FEATURES ADICIONALES
+============================================================
+
+Lag Exploit           Sequence manipulation en NetChan
+Choke Exploit         Packet throttling en NetChan
+Speed Hack            Modifica GlobalVars->curtime + animaciones
+Fast Actions          Speed de acciones
+Silent Angles         CalcPlayerView (YA IMPLEMENTADO)
+No-Smoke/Vomit        Draw_Effect hook (hook ya existe)
+Chams                 DrawModelExecute + materiales custom
+Glow                  Brillo en entidades
+Crosshair             Mira personalizada (Storm tiene implementacion)
+Thirdperson           Camara 3ra persona
+NoRecoil              Quita retroceso visual
+Bunnyhop Rage         Bunnyhop agresivo (Storm tiene)
+Strafe Turbo          Strafe con ticks extra
+Invisible Jockey      Jockey invisible al saltar
+Auto-Shove            YA LISTADO ARRIBA
+Config System         ConVars para toggles desde consola
+Viewmodel             Modificar posicion del arma en pantalla
+No-Smoke/Vomit        Filtro de efectos visuales
+Spectator List        Quien te esta mirando
+
+============================================================
+📋 PENDIENTE - NO-SPREAD / LUA / VISUALES
+============================================================
+
+UpdateSpread          Hook en 0x30CAD0 (offset verificado)
+Random Seed           m_dwSetPredictionRandomSeed
+GetCurrentSpread      Lectura del spread actual del arma
+IsNoSpreadWeapon      Verifica si el arma soporta no-spread
+Lua Scripting         Lua 5.4 para logica de juego
+Event System          Registro de eventos (player_say, etc.)
+Glow/Chams            Sistema de materiales
+No-Vomit              Filtro de vomito (byte patch)
+No-Smoke              Filtro de humo (byte patch)
+
+============================================================
+📋 PENDIENTE - PENETRACION DE DAÑO
+============================================================
+
+Set_Host              MoveHelper->SetHost (YA IMPLEMENTADO)
+Get_Bounds            Damage penetration
+Calculate_Distance    Damage penetration
+Calculate_Damage      server.dll - Crash al usar
+ChargerTurn_HitCheck  Byte patch +85 (no-spread - rompe mov)
+Draw_Effect           NoSmoke/NoParticles (YA IMPLEMENTADO)
+GetEffectName         Nombre de efecto
+
+============================================================
+📋 EXTRAS (NO IMPLEMENTADOS EN NINGUNA FUENTE PERO POSIBLES)
+============================================================
+
+Radar                 Minimapa con posicion de enemigos
+Offscreen Arrows      Flechas a enemigos fuera de pantalla
+Hitsound              Sonido al pegar tiro
+Damage Indicator      Muestra dano hecho
+Anti-AFK              No kick por inactivo
+Tank Rock Warning     Alerta de roca de Tank
+Witch Warning         Alerta de Witch cercana
+Auto-Pistol           Pistola automatica
+Rapid Fire            Disparo mas rapido
+Perfect Pounce        Calculo de angulo para Hunter
+Spit Trajectory       Trayectoria de spit de Spitter
+Tank Rock Trajectory  Trayectoria de roca de Tank
+Instant Respawn       Respawn sin esperar
+Silent Walk           Caminar sin ruido
+No Fall Damage        Sin dano por caida
+Config System         Guardar/cargar perfiles JSON
+Anti-Stuck            Atravesar teammates
+Auto-Medkit/Pills     Usar items automaticamente
+Defib Cheat           Revivir instantaneo
+Ladder Speed          Escaleras mas rapido
+Chat Spam             Spam en chat
+Name Stealer          Robar nombres
+Clantag Changer       Clantag animado
+Fake Ban              Mensaje falso de banned
+Fake Lag              Lag artificial
+Desync                Desyncronizacion
+Double Tap            2 balas en 1 tick
+Hide Shots            Disparo invisible
+Slow Walk             Movimiento minimo
+Fake Duck             Duck falso
+Lag Switch            Toggle de lag
+Tickbase Manipulation Robo de ticks
+Anti-Aim              Hitbox impredecible
+Jitter Move           Movimiento tembloroso
+Clock Correction Bypass Bypass de correccion de reloj
+Backup Commands Boost Mas backup commands
+Interp Exploit        cl_interp 0

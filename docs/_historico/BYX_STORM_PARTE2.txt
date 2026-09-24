@@ -1,0 +1,115 @@
+============================================================
+ BYX STORM - PARTE 2: REFERENCIA TECNICA COMPLETA
+ Julio 2026
+============================================================
+
+PIPELINE DE HOOKS
+=================
+
+Copy_Command (cada tick):
+  AutoDuck -> Bunnyhop -> AutoStrafe -> Triggerbot -> RapidFire
+  -> Rage Aimbot -> Legit Aimbot -> MiscTools -> NoSpread
+  -> CALL_ORIGINAL
+
+CalcPlayerView (cada frame):
+  CALL_ORIGINAL -> Thirdperson::Apply -> Silent Aim -> NoRecoil
+
+INetChannel_SendNetMsg:
+  Procesa choked commands -> reempaqueta -> CALL_ORIGINAL
+
+Paint:
+  UpdateW2SMatrix -> ESP::Render -> MiscTools::Paint -> FOV Circle
+
+
+OFFSETS VERIFICADOS (client.dll)
+=================================
+
+client+0x30CAD0 = UpdateSpread (offset verificado)
+client+0x1ACDB0 = Random_Type (Storm, para angle compensation)
+                  [corregido 2026-07-15: era 0x1ACE30 (0x80 bytes off),
+                   causaba crash instantaneo en NoSpread al llamarlo como
+                   funcion; verificado contra offset del proyecto de
+                   referencia en Downloads/Storm-L4D2-Updated-L4d2, cross-
+                   checkeado con Weapon+0xD0C y Player+0x1204 que coinciden
+                   exactos entre ambos proyectos = misma version de client.dll]
+client+0x2F5D20 = Fire_Bullet (Storm, para bullet trace)
+client+0x726C58 = Local player pointer (g_pClientState->m_pLocalPlayer)
+Player+0x1384  = m_angEyeAngles (para silent aim/thirdperson)
+Player+0x1204  = m_vecPunchAngle (para NoRecoil)
+Weapon+0xD0C   = m_flMaxSpread (para no-spread)
+Entity+0x150   = m_flSimulationTime (para lag compensation)
+Player+0x5324  = m_nTickBase (para backtrack)
+
+
+FIRMAS - REFERENCIA EXTERNA
+=========================
+
+Copy_Command:     55 8B EC 8B 45 ?? 85 C0 74 ?? 50 81 C1
+Set_Host:         55 8B EC 8B 45 ?? 8B 11 89 41
+Get_Bounds:       55 8B EC 83 EC ?? 56 8B F1 8B 4D ?? 8D 45 ?? 50 51 8B CE E8...
+Calculate_Distance: 53 8B DC 83 EC ?? 83 E4 ?? 83 C4 ?? 55 8B 6B ?? 89 6C 24...
+Calculate_Damage: 55 8B EC 83 EC ?? F3 0F 10 4D ?? 0F 2E 0D ?? ?? ?? ?? (server.dll!)
+ChargerTurn:      55 8B EC 8B 45 08 56 8B F1 83 F8 FF 75 10... (NOP en +85)
+Draw_Effect:      55 8B EC 83 EC ?? A1 ?? ?? ?? ?? 53 56 8B F1 33 C9...
+GetEffectName:    83 C1 ?? E9 ?? ?? ?? ?? CC CC CC CC CC CC CC CC 56
+
+
+STORM SEEDS (No-Spread)
+=======================
+
+AutoShotgun (2):       command# = -2134739495, seed = 11144000
+PumpShotgun (148):     command# = -2139542887, seed = 1246243990
+SPAS/Chrome (162/163): command# = -2139097805, seed = 494641349
+Otras armas:           seed = 0
+
+
+CLASS IDS PRINCIPALES
+=====================
+
+CTerrorPlayer=232, SurvivorBot=275, Tank=276, Witch=277
+Infected=264, Hunter=263, Smoker=270, Boomer=0
+Spitter=272, Jockey=265, Charger=99
+CPistol=131, CMagnumPistol=116, CAutoShotgun=2
+CPumpShotgun=148, CShotgun_Chrome=162, CShotgun_SPAS=163
+CRifle_AK47=152, CRifle_Desert=153, CSniperRifle=172
+CChainsaw=39, CSMG_MP5=165, CSMG_Silenced=166
+
+
+STORM HITBOX MAP (per-ClassId)
+===============================
+
+Charger(99)=9, Hunter(263)=10, Common(264)=15
+Jockey(265)=4, Smoker(270)=10, Spitter(272)=4
+Tank(276)=12, Witch(277)=10
+
+
+BUGS CORREGIDOS (historial)
+============================
+
+1.  Auto-shoot usaba FOV pre-smooth -> ahora verifica por distancia
+2.  Muertos: lifeState + health <= 0 (doble check)
+3.  CalcAngle NaN (target arriba/abajo) -> VectorAngles
+4.  SmoothAngle usaba world distance -> calcula angDist interno
+5.  Dangling pointer en TargetResult -> nEntityIndex
+6.  As<TerrorPlayer>() unsafe static_cast -> IsTerrorPlayerClass guard
+7.  Weapon ClassIds mezclados (Lua vs C++) -> corregido
+8.  rand() sin seed -> std::mt19937 + random_device
+9.  Silent angles sobrescritos -> CalcPlayerView hook
+10. Grace period invertido (reseteaba en vez de preservar)
+11. Bone selector roto -> GetShootPos solo para head
+12. FOV adaptive/weapon sin limite -> cap a cfg.flFOV
+13. Target lock no se soltaba -> break si no target
+14. UpdateSpread offset 0x30CD50 era 0x30CAD0 (20 bytes off)
+
+
+LO QUE QUEDO PENDIENTE
+======================
+
+- Fire_Bullet validacion (offset verificado, no implementado)
+- Damage Calc (server.dll, crash al llamar)
+- Random_Type angle compensation (crash al llamar)
+- Backtrack (falta Run_Command + Post_Network_Data_Received)
+- Fake Lag / Choke Exploit (LOKI offsets encontrados)
+- Speed Hack (Extra Commands parcial en DllMain)
+- NoSpread para no-shotguns (seeds no encontrados)
+- ViewModel (cvars no funcionan en L4D2)

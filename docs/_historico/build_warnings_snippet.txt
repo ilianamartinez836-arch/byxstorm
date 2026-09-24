@@ -1,0 +1,21 @@
+﻿
+  In file included from src\App\Features\Aimbot\Aimbot.cpp:1:
+  In file included from src\App\Features\Aimbot\Aimbot.h:2:
+  In file included from src\App\Features\Aimbot\../../../SDK/SDK.h:5:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2/IPanel.h:3:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\IMatSystemSurface.h:2:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\ISurface.h:3:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\IAppSystem.h:2:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\interface.h:3:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\../../Utils/Utils.h:5:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\../../Utils\Config/Config.h:8:
+src\App\Features\Aimbot\../../../SDK\L4D2\../../Utils\Config\json.hpp(25263,35): warning : identifier '_json' preceded by whitespace in a literal operator declaration is deprecated [-Wdeprecated-literal-operator] [C:\Byx_storm-L4D2\ByxStorm.vcxproj]
+src\App\Features\Aimbot\../../../SDK\L4D2\../../Utils\Config\json.hpp(25282,49): warning : identifier '_json_pointer' preceded by whitespace in a literal operator declaration is deprecated [-Wdeprecated-literal-operator] [C:\Byx_storm-L4D2\ByxStorm.vcxproj]
+  In file included from src\App\Features\Aimbot\Aimbot.cpp:1:
+  In file included from src\App\Features\Aimbot\Aimbot.h:2:
+  In file included from src\App\Features\Aimbot\../../../SDK/SDK.h:5:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2/IPanel.h:3:
+  In file included from src\App\Features\Aimbot\../../../SDK\L4D2\IMatSystemSurface.h:2:
+src\App\Features\Aimbot\../../../SDK\L4D2\ISurface.h(97,22): warning : 'thiscall' attribute only applies to functions and methods [-Wignored-attributes] [C:\Byx_storm-L4D2\ByxStorm.vcxproj]
+  ByxStorm.vcxproj -> C:\Byx_storm-L4D2\Release\ByxStorm.dll
+
